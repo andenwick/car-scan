@@ -1,0 +1,113 @@
+obd_types.h — All Public Types Explained
+=========================================
+
+This file defines every data structure, enum, and constant used by the library.
+It's included by obd.h, which is included by everything else. Think of it as
+the dictionary that defines the vocabulary the whole library speaks.
+
+
+obd_result_t (error codes)
+--------------------------
+Every public function returns this enum. It's how you know if a function
+succeeded or failed, and WHY it failed.
+
+  OBD_OK (0)                  — Success. Use the output.
+  OBD_ERROR_INVALID_ARG (-1)  — You passed NULL or a bad parameter.
+  OBD_ERROR_BUFFER_TOO_SMALL (-2) — Your output buffer isn't big enough.
+  OBD_ERROR_INVALID_HEX (-3)  — The hex string contains non-hex characters.
+  OBD_ERROR_NO_DATA (-4)      — The car said "NO DATA" (PID not supported).
+  OBD_ERROR_ELM_ERROR (-5)    — The adapter returned an error.
+  OBD_ERROR_PARSE_FAILED (-6) — Couldn't understand the response format.
+  OBD_ERROR_UNKNOWN_PID (-7)  — PID not in our lookup table.
+
+Why negative numbers? Convention. Zero = success, negative = error.
+This way you can write: if (result < 0) { handle error }.
+
+
+obd_elm_response_type_t (response classification)
+--------------------------------------------------
+The ELM327 adapter can send several types of responses. Before parsing data,
+we first classify WHAT we got:
+
+  OBD_ELM_RESPONSE_DATA    — Hex data from the car. Parse it.
+  OBD_ELM_RESPONSE_OK      — "OK" reply to an AT command (like ATZ reset).
+  OBD_ELM_RESPONSE_NO_DATA — "NO DATA" — the car didn't understand the request.
+  OBD_ELM_RESPONSE_ERROR   — "?" or other error from the adapter.
+  OBD_ELM_RESPONSE_PROMPT  — ">" means the adapter is ready for next command.
+  OBD_ELM_RESPONSE_UNKNOWN — Something we don't recognize.
+
+
+#define constants (sizes)
+-------------------------
+  OBD_MAX_DATA_BYTES (7)    — Max bytes in a single OBD response frame.
+  OBD_VIN_LENGTH (17)       — VIN is always exactly 17 characters.
+  OBD_DTC_CODE_LENGTH (6)   — "P0301" = 5 chars + null terminator = 6.
+  OBD_MAX_DTCS (32)         — Max DTCs we'll store from one Mode 03 query.
+  OBD_MAX_RESPONSE_LEN (256)— Max length of a raw ELM327 response string.
+  OBD_MAX_COMMAND_LEN (16)  — Max length of a command string we build.
+
+These are all from the OBD-II spec or practical limits. By hardcoding them,
+we never need malloc — every buffer can be stack-allocated.
+
+
+obd_pid_response_t (parsed PID response)
+-----------------------------------------
+When you ask the car for a sensor value, the raw response is a hex string like:
+  "41 0C 1A F8"
+
+After parsing, this struct holds:
+  mode     = 0x41  (0x40 + 0x01 means "response to Mode 01")
+  pid      = 0x0C  (the PID you asked about)
+  data     = {0x1A, 0xF8}  (the raw value bytes)
+  data_len = 2     (number of value bytes)
+
+WHY does the response mode have 0x40 added?
+The OBD-II spec says response mode = request mode + 0x40.
+So if you send mode 0x01, the response says 0x41. Mode 0x03 → response 0x43.
+This is how you match responses to requests.
+
+
+obd_sensor_value_t (decoded sensor reading)
+-------------------------------------------
+After parsing the raw bytes, we apply a formula. For RPM (PID 0x0C):
+  A = 0x1A = 26, B = 0xF8 = 248
+  Formula: ((A*256)+B)/4 = ((26*256)+248)/4 = 6904/4 = 1726.0
+
+This struct holds:
+  pid   = 0x0C
+  value = 1726.0
+  name  = "Engine RPM"
+  unit  = "rpm"
+
+
+obd_dtc_category_t (DTC letter categories)
+-------------------------------------------
+Diagnostic Trouble Codes start with a letter that tells you what system:
+  P = Powertrain (engine, transmission) — about 80% of all codes
+  C = Chassis (ABS brakes, stability control, steering)
+  B = Body (airbags, door locks, windows, seats)
+  U = Network/communication (CAN bus issues between modules)
+
+The first 2 bits of the raw DTC byte determine the letter:
+  00 = P, 01 = C, 10 = B, 11 = U
+
+
+obd_dtc_t (single trouble code)
+-------------------------------
+A parsed DTC with:
+  category  = OBD_DTC_POWERTRAIN (the letter P)
+  code      = 0x0301 (the numeric part)
+  formatted = "P0301" (human-readable string)
+
+Example: P0301 = cylinder 1 misfire detected.
+
+
+obd_dtc_list_t (collection of trouble codes)
+---------------------------------------------
+Mode 03 can return multiple DTCs at once. This struct is just:
+  dtcs[32]  — array of obd_dtc_t
+  count     — how many are valid
+
+Why 32 max? Practically no car has more than ~20 DTCs stored at once.
+32 gives us headroom without wasting much stack space (each obd_dtc_t
+is only ~12 bytes, so 32 of them = ~384 bytes).

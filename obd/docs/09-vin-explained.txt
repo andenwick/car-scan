@@ -1,0 +1,99 @@
+vin module — Explained
+=======================
+
+WHAT IS A VIN?
+--------------
+VIN = Vehicle Identification Number. It's a 17-character string stamped
+into the car's dashboard and stored in the ECU. Every vehicle made since
+1981 has a unique VIN.
+
+Example: WBA3B5FK7FN123456
+
+  Characters 1-3 (WBA): World Manufacturer Identifier
+    W = Germany, BA = BMW
+    (1/4/5 = USA, 2 = Canada, 3 = Mexico, J = Japan, etc.)
+
+  Characters 4-8 (3B5FK): Vehicle Descriptor Section
+    Model, body type, engine, restraint system
+
+  Character 9 (7): Check digit (error detection)
+    Calculated from other characters using a formula
+
+  Character 10 (F): Model year
+    A=1980, B=1981, ..., Y=2000, 1=2001, ..., 9=2009, A=2010, ...
+    F = 2015
+
+  Character 11 (N): Assembly plant
+    Which factory built this specific car
+
+  Characters 12-17 (123456): Serial number
+    Unique within the plant for that year
+
+We send the VIN to the NHTSA vPIC API (free, government) to decode
+year, make, model, engine, etc.
+
+
+WHY MULTI-LINE?
+---------------
+A single OBD-II frame can carry about 4-5 data bytes. The VIN is 17
+characters, so it needs multiple frames. The ELM327 returns these as
+multiple text lines.
+
+
+RESPONSE FORMAT
+---------------
+You send "0902\r" (Mode 09, PID 02 = VIN request) and get back:
+
+  "49 02 01 57 42 41 33\r"    ← line 1
+  "49 02 02 42 35 46 4B\r"    ← line 2
+  "49 02 03 37 46 4E 31\r"    ← line 3
+  "49 02 04 32 33 34 35\r"    ← line 4
+  "49 02 05 36 00 00 00"      ← line 5
+
+Breaking down each line:
+  49    = response to Mode 09 (0x09 + 0x40)
+  02    = PID 02 (VIN)
+  01    = sequence number (which chunk this is: 1st, 2nd, etc.)
+  57 42 41 33 = data bytes (ASCII codes for VIN characters)
+
+  57 = 'W', 42 = 'B', 41 = 'A', 33 = '3'  → "WBA3"
+  42 = 'B', 35 = '5', 46 = 'F', 4B = 'K'  → "B5FK"
+  37 = '7', 46 = 'F', 4E = 'N', 31 = '1'  → "7FN1"
+  32 = '2', 33 = '3', 34 = '4', 35 = '5'  → "2345"
+  36 = '6', 00 = padding, 00 = padding, 00 = padding → "6"
+
+Concatenated: "WBA3B5FK7FN123456" (17 characters, padding skipped)
+
+
+PARSING STRATEGY
+-----------------
+1. Split the response into lines (by \r)
+2. For each line:
+   a. Convert hex string to bytes
+   b. Verify bytes[0]==0x49 and bytes[1]==0x02 (correct header)
+   c. bytes[2] is the sequence number — we skip it
+   d. bytes[3] through end are VIN character ASCII codes
+   e. Append each non-zero byte as a character to the VIN string
+3. After processing all lines, verify we got exactly 17 characters
+
+The null bytes (0x00) at the end of the last line are padding because
+17 doesn't divide evenly by 4. We skip them.
+
+
+ASCII
+-----
+Every VIN character is stored as its ASCII code:
+  'A' = 0x41 = 65
+  '0' = 0x30 = 48
+  'Z' = 0x5A = 90
+  '9' = 0x39 = 57
+
+VINs only use uppercase letters (except I, O, Q which are excluded
+to avoid confusion with 1, 0) and digits 0-9.
+
+In C, casting a byte to char gives you the character:
+  (char)0x57 = 'W'
+  (char)0x42 = 'B'
+
+This is because C's char type IS a small integer, and the values
+happen to be ASCII codes.

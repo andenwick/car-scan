@@ -1,0 +1,134 @@
+sensor module — Explained
+==========================
+
+WHAT THIS MODULE DOES
+---------------------
+Takes raw data bytes from a PID response and converts them to a
+human-readable value with a name and unit.
+
+  Input:  PID 0x0C, data = {0x1A, 0xF8}
+  Output: value = 1726.0, name = "Engine RPM", unit = "rpm"
+
+
+THE FORMULA CONVENTION (A, B, C, D)
+------------------------------------
+The OBD-II standard names the data bytes alphabetically:
+  A = first data byte  (data[0])
+  B = second data byte (data[1])
+  C = third data byte  (data[2])
+  D = fourth data byte (data[3])
+
+Every formula in the spec uses these letters. For example:
+  RPM = ((A * 256) + B) / 4
+
+In C, that's: ((data[0] * 256.0) + data[1]) / 4.0
+
+
+WHY THESE SPECIFIC FORMULAS?
+------------------------------
+The formulas are standardized by SAE J1979. Every car manufacturer
+must implement them the same way. Here's the reasoning behind each:
+
+RPM: ((A * 256) + B) / 4
+  Two bytes give us a 16-bit value (0-65535). A*256+B combines them.
+  Divided by 4 gives quarter-RPM precision. So the raw value counts
+  in 0.25 RPM increments, giving range 0 to 16383.75 RPM.
+
+  Example: A=0x1A(26), B=0xF8(248)
+  → (26*256 + 248) / 4 = 6904/4 = 1726.0 RPM
+
+Temperature: A - 40
+  A single byte (0-255) with a -40 offset. This lets one unsigned
+  byte represent -40°C to 215°C. Without the offset, you couldn't
+  represent negative temperatures.
+
+  Example: A=0x7B(123) → 123-40 = 83°C
+
+Percent: A * 100 / 255
+  Maps 0-255 to 0-100%. Pure linear scaling.
+
+  Example: A=0x33(51) → 51*100/255 = 20.0%
+
+Speed: A
+  Direct mapping, 1 byte = 1 km/h. Simple.
+  Range: 0-255 km/h (159 mph).
+
+MAF: ((A * 256) + B) / 100
+  16-bit value divided by 100 for 0.01 g/s precision.
+  Range: 0-655.35 g/s.
+
+Fuel pressure: A * 3
+  Multiply by 3 to get kPa. Range: 0-765 kPa.
+
+Timing advance: A / 2 - 64
+  Range: -64° to +63.5° before TDC (Top Dead Center).
+  The /2 gives half-degree precision.
+
+
+THE LOOKUP TABLE PATTERN
+-------------------------
+Instead of writing a giant switch statement:
+
+  switch(pid) {
+      case 0x0C: value = ((A*256)+B)/4; name = "RPM"; ...
+      case 0x0D: value = A; name = "Speed"; ...
+      ...
+  }
+
+We use a data-driven lookup table:
+
+  static const sensor_entry_t sensor_table[] = {
+      { 0x0C, "Engine RPM",  "rpm",  2, formula_rpm },
+      { 0x0D, "Vehicle Speed", "km/h", 1, formula_direct },
+      ...
+  };
+
+Each row stores: PID number, name, unit, expected byte count,
+and a FUNCTION POINTER to the formula.
+
+Advantages:
+  1. Adding a new PID = adding one row. No code changes.
+  2. All PID metadata is in one place. Easy to audit.
+  3. The formula functions are small and independently testable.
+
+
+FUNCTION POINTERS
+-----------------
+  typedef float (*sensor_formula_fn)(const uint8_t *data, size_t data_len);
+
+This defines a TYPE called sensor_formula_fn. It's a pointer to any
+function that takes (const uint8_t*, size_t) and returns float.
+
+In the table, formula_rpm, formula_direct, etc. are all functions
+matching this signature. The table stores pointers to them.
+
+When we call:
+  entry->formula(response->data, response->data_len)
+
+C calls whichever function the pointer points to. If entry is the
+RPM row, it calls formula_rpm(). If it's the speed row, formula_direct().
+
+This is C's version of polymorphism (different behavior from the same call).
+
+
+WHY (void)data_len IN FORMULA FUNCTIONS?
+-----------------------------------------
+  static float formula_direct(const uint8_t *data, size_t data_len)
+  {
+      (void)data_len;  /* <-- this line */
+      return (float)data[0];
+  }
+
+Most formula functions don't use data_len (they know exactly which
+bytes they need). But the function pointer type requires the parameter.
+(void)data_len tells the compiler "I know I'm not using this parameter,
+it's intentional." Without it, the compiler would emit a warning
+because we have strict warnings enabled (-Werror/WX).
+
+
+WHY FLOAT, NOT DOUBLE?
+-----------------------
+OBD-II sensor values don't need double precision. A float gives ~7
+significant digits, which is far more than enough for RPM (0-16384),
+temperature (-40 to 215), or speed (0-255). Using float saves memory
+and matches what embedded systems typically use.

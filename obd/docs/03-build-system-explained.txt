@@ -1,0 +1,91 @@
+Build System (CMake) — Explained
+=================================
+
+WHAT IS CMAKE?
+--------------
+CMake is NOT a compiler. It's a "build system generator." You write ONE
+CMakeLists.txt file, and CMake generates the actual build files for whatever
+compiler/platform you're on:
+  - Windows + MSVC → generates Ninja/MSBuild files
+  - Linux + GCC → generates Makefiles
+  - Mac + Clang → generates Xcode projects
+  - Android NDK → generates Ninja files for cross-compilation
+
+This is how we keep the C library portable.
+
+
+obd/CMakeLists.txt breakdown
+-----------------------------
+1. cmake_minimum_required(VERSION 3.15)
+   → "You need at least CMake 3.15 to build this"
+
+2. project(obd C)
+   → Project is called "obd" and uses the C language
+
+3. set(CMAKE_C_STANDARD 11)
+   → Use C11, a modern version of C from 2011. Gives us nice features like
+     designated initializers: (struct) { .field = value }
+
+4. add_library(obd STATIC src/hex_utils.c src/elm327.c ...)
+   → Compile all these .c files and bundle them into a static library.
+   → "STATIC" means the code gets copied INTO your executable at link time.
+     No separate DLL needed. The output is "obd.lib" (Windows) or "libobd.a" (Linux).
+
+5. target_include_directories(obd PUBLIC include PRIVATE src)
+   → PUBLIC include: anyone who links against obd automatically gets the
+     include/ path added. So they can write #include <obd/obd.h>.
+   → PRIVATE src: only obd's own .c files can see headers in src/.
+     This enforces encapsulation — outside code can't include internal headers.
+
+6. target_compile_options(obd PRIVATE /W4 /WX)
+   → /W4 = warning level 4 (almost all warnings)
+   → /WX = treat warnings as errors (forces us to write clean code)
+   → GCC equivalent: -Wall -Wextra -Werror -pedantic
+
+7. enable_testing() + add_subdirectory(tests)
+   → Turns on CTest and includes the tests/CMakeLists.txt
+
+
+tests/CMakeLists.txt breakdown
+-------------------------------
+Uses a foreach loop — for each module name (hex_utils, elm327, pid, etc.):
+
+1. add_executable(test_hex_utils test_hex_utils.c)
+   → Compile test_hex_utils.c into an executable
+
+2. target_link_libraries(test_hex_utils PRIVATE obd)
+   → Link against our library so the test can call obd_hex_to_bytes(), etc.
+
+3. target_include_directories(test_hex_utils PRIVATE .)
+   → So tests can #include "test_data.h" from the tests/ directory
+
+4. add_test(NAME test_hex_utils COMMAND test_hex_utils)
+   → Register with CTest. When you run "ctest", it runs this executable
+     and reports pass/fail based on the exit code (0 = pass, non-zero = fail).
+
+
+HOW TO BUILD
+------------
+From a VS Developer Command Prompt (or after running vcvarsall.bat):
+
+  cd obd
+  mkdir build
+  cd build
+  cmake .. -G Ninja
+  cmake --build .
+  ctest --output-on-failure
+
+Step by step:
+  "cmake .. -G Ninja"
+    → Read CMakeLists.txt from parent dir (..), generate Ninja build files
+  "cmake --build ."
+    → Actually compile everything using Ninja + MSVC
+  "ctest --output-on-failure"
+    → Run all registered tests, show stdout/stderr if any fail
+
+
+WHY NINJA INSTEAD OF MAKEFILES?
+---------------------------------
+Ninja is faster than Make (especially on Windows) and comes bundled with
+Visual Studio Build Tools. MinGW Makefiles require installing MinGW separately.
+Since you already have VS Build Tools installed, Ninja is the path of least resistance.

@@ -1,0 +1,167 @@
+obd.h — Public API Walkthrough
+================================
+
+obd.h is the ONLY header your code needs to include. It pulls in obd_types.h
+automatically. The API is organized into 6 groups matching the 6 source modules.
+
+Every function follows the same pattern:
+  1. Takes input (a string, a struct, or raw bytes)
+  2. Writes output into a caller-provided buffer/struct (zero malloc!)
+  3. Returns obd_result_t (0 = success, negative = error)
+
+
+GROUP 1: Hex Utilities (hex_utils.c)
+------------------------------------
+These convert between hex strings and byte arrays. The ELM327 adapter
+communicates in hex text, but we need actual byte values for math.
+
+  obd_hex_to_bytes("41 0C 1A F8", buf, sizeof(buf), &len)
+    → buf = {0x41, 0x0C, 0x1A, 0xF8}, len = 4
+    Spaces in the input are automatically skipped.
+
+  obd_bytes_to_hex({0x41, 0x0C}, 2, buf, sizeof(buf))
+    → buf = "41 0C"
+    Output is uppercase, space-separated.
+
+  obd_strip_whitespace(str)
+    → Removes spaces, tabs, \r, \n from str IN-PLACE.
+    "41 0C\r\n" becomes "410C"
+    This is a void function — no return code, it can't fail.
+
+
+GROUP 2: ELM327 Commands (elm327.c)
+------------------------------------
+The ELM327 adapter chip needs initialization before it talks to the car.
+AT commands (inherited from old modem days) configure the adapter.
+
+  obd_elm327_cmd_reset()       → returns "ATZ\r"    (reset adapter)
+  obd_elm327_cmd_echo_off()    → returns "ATE0\r"   (stop echoing commands)
+  obd_elm327_cmd_linefeed_off()→ returns "ATL0\r"   (no linefeeds in responses)
+  obd_elm327_cmd_protocol_auto()→ returns "ATSP0\r" (auto-detect car's protocol)
+  obd_elm327_cmd_headers_on()  → returns "ATH1\r"   (show response headers)
+  obd_elm327_cmd_headers_off() → returns "ATH0\r"   (hide response headers)
+
+  These ALL return const char* pointing to string literals baked into the
+  binary. You never free() them. Just send them over Bluetooth.
+
+  A typical initialization sequence:
+    send(obd_elm327_cmd_reset());        // ATZ\r  → adapter responds "ELM327 v1.5"
+    send(obd_elm327_cmd_echo_off());     // ATE0\r → "OK"
+    send(obd_elm327_cmd_linefeed_off()); // ATL0\r → "OK"
+    send(obd_elm327_cmd_protocol_auto());// ATSP0\r → "OK"
+
+  obd_elm327_classify_response(response)
+    Looks at a response string and tells you what type it is:
+    "41 0C 1A F8"  → OBD_ELM_RESPONSE_DATA
+    "OK"           → OBD_ELM_RESPONSE_OK
+    "NO DATA"      → OBD_ELM_RESPONSE_NO_DATA
+    "?"            → OBD_ELM_RESPONSE_ERROR
+    ">"            → OBD_ELM_RESPONSE_PROMPT
+
+  obd_elm327_clean_response(raw, out, out_size)
+    Adapter output is messy: "010C\r41 0C 1A F8\r\r>"
+    This extracts just the data: "41 0C 1A F8"
+    It strips the echo (the "010C\r" part), prompt (">"), and trailing junk.
+
+
+GROUP 3: PID Requests (pid.c)
+------------------------------
+PIDs (Parameter IDs) are how you ask the car for specific data points.
+
+  obd_pid_build_request(0x01, 0x0C, buf, sizeof(buf))
+    Mode 0x01 = "live data", PID 0x0C = "engine RPM"
+    → buf = "010C\r"
+    The \r (carriage return) is required — the ELM327 uses it as the
+    "end of command" marker.
+
+  obd_pid_parse_response("41 0C 1A F8", &response)
+    → response.mode = 0x41
+    → response.pid = 0x0C
+    → response.data = {0x1A, 0xF8}
+    → response.data_len = 2
+
+  Common PIDs you'll see:
+    0x05 = Engine coolant temperature
+    0x0C = Engine RPM
+    0x0D = Vehicle speed
+    0x0F = Intake air temperature
+    0x10 = MAF air flow rate
+    0x11 = Throttle position
+
+
+GROUP 4: Sensor Decoding (sensor.c)
+------------------------------------
+Each PID has a specific formula defined by the OBD-II standard.
+The data bytes are conventionally called A, B, C, D (first byte = A).
+
+  obd_sensor_decode(&pid_response, &sensor)
+    Looks up the PID in a table, applies the formula, fills in:
+    → sensor.value = 1726.0
+    → sensor.name = "Engine RPM"
+    → sensor.unit = "rpm"
+
+  Some formulas:
+    PID 0x05 (Coolant temp):  A - 40        (range: -40 to 215 °C)
+    PID 0x0C (RPM):           ((A*256)+B)/4  (range: 0 to 16383.75 rpm)
+    PID 0x0D (Speed):         A              (range: 0 to 255 km/h)
+    PID 0x0F (Intake temp):   A - 40         (same formula as coolant)
+    PID 0x10 (MAF):           ((A*256)+B)/100 (range: 0 to 655.35 g/s)
+    PID 0x11 (Throttle):      A*100/255      (range: 0 to 100 %)
+
+  Why "A - 40"? The OBD-II spec encodes temperatures with +40 offset
+  so that a single unsigned byte can represent -40°C to +215°C.
+
+  obd_sensor_get_name(0x0C, buf, sizeof(buf))
+    → buf = "Engine RPM"
+    Just the name, no decoding. Useful for building UI labels.
+
+
+GROUP 5: DTC Parsing (dtc.c)
+------------------------------
+  obd_dtc_build_request(buf, sizeof(buf))
+    → buf = "03\r"  (Mode 03 = "read stored DTCs")
+
+  obd_dtc_parse_response("43 01 03 01 04 00 00", &list)
+    0x43 = response to Mode 03
+    Then pairs of bytes: 01 03 → DTC, 01 04 → DTC, 00 00 → padding (ignored)
+
+    How 2 raw bytes become a DTC code:
+      Byte 1: 0x01 = 0000 0001
+      Byte 2: 0x03 = 0000 0011
+      Combined 16 bits: 0000 0001 0000 0011
+      First 2 bits (00) → P (Powertrain)
+      Remaining 14 bits → 0103 (in hex)
+      Result: "P0103" (Mass Air Flow sensor circuit high)
+
+    → list.count = 2
+    → list.dtcs[0].formatted = "P0103"
+    → list.dtcs[1].formatted = "P0104"
+
+  obd_dtc_format(&dtc, buf, sizeof(buf))
+    → buf = "P0301"
+    Takes a parsed DTC struct and writes the 5-character string.
+
+
+GROUP 6: VIN Decoding (vin.c)
+------------------------------
+  obd_vin_build_request(buf, sizeof(buf))
+    → buf = "0902\r"  (Mode 09, PID 02 = "request VIN")
+
+  obd_vin_parse_response(multi_line_response, vin, sizeof(vin))
+    The VIN is 17 characters but OBD frames only hold ~4-5 data bytes each,
+    so the response comes in multiple lines:
+
+      "49 02 01 57 42 41 33\r\n"   ← line 1: sequence 01, bytes W B A 3
+      "49 02 02 42 35 46 4B\r\n"   ← line 2: sequence 02, bytes B 5 F K
+      "49 02 03 57 47 59 32\r\n"   ← line 3: sequence 03, bytes W G Y 2
+      ...etc...
+
+    49 = response to Mode 09
+    02 = PID 02 (VIN)
+    01/02/03 = sequence number (which chunk this is)
+    The rest are ASCII values of VIN characters
+
+    → vin = "WBA3B5FKWGY2..." (17 characters)
+
+    The VIN tells you: manufacturer, model, year, engine, assembly plant, and
+    a unique serial number. We send this to the NHTSA API for full decode.

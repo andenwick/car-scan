@@ -1,0 +1,119 @@
+elm327 module — Explained
+==========================
+
+WHAT IS THE ELM327?
+-------------------
+The ELM327 is a small microcontroller chip inside every OBD-II Bluetooth adapter.
+When you buy a "$15 OBD scanner on Amazon," the chip inside is an ELM327 (or a clone).
+
+It translates between:
+  Bluetooth (what your phone speaks) ←→ OBD-II (what your car speaks)
+
+You send it text commands over Bluetooth, and it replies with text.
+
+
+AT COMMANDS
+-----------
+Before talking to the car, you initialize the adapter with "AT" commands.
+These configure the adapter itself (not the car).
+
+"AT" stands for "ATtention" — a prefix from the 1980s Hayes modem standard.
+Modems used AT commands, and ELM327 inherited the convention.
+
+  ATZ    — Reset to factory defaults. The adapter responds with its
+           version string, e.g., "ELM327 v1.5"
+
+  ATE0   — Echo Off. By default, the adapter echoes back everything you
+           send it. "ATE0" tells it to stop. Makes responses cleaner.
+
+  ATL0   — Linefeed Off. Suppresses \n characters in responses.
+           We only want \r (carriage return) as line separators.
+
+  ATSP0  — Set Protocol 0 (auto-detect). The car might use one of several
+           OBD protocols (CAN, ISO 9141, J1850, etc.). "0" means "figure
+           it out yourself." The adapter tries each one until it works.
+
+  ATH1/ATH0 — Headers On/Off. Headers include extra bytes showing which
+              ECU (Electronic Control Unit) sent the response. Useful for
+              multi-ECU vehicles. Off by default for simpler responses.
+
+Each command ends with \r (carriage return) to tell the adapter you're done.
+
+
+RESPONSE CLASSIFICATION
+-----------------------
+After you send a command, the adapter responds. But the response format
+varies wildly:
+
+  "41 0C 1A F8"   → hex data from the car (what we usually want)
+  "OK"            → acknowledgment of an AT command
+  "NO DATA"       → the car didn't respond (PID not supported, or car off)
+  "?"             → adapter didn't understand your command
+  ">"             → prompt (adapter ready for next command)
+  "ELM327 v1.5"  → version string after reset
+  "ERROR"         → something went wrong
+  "UNABLE TO CONNECT" → can't reach the car's ECU
+  "STOPPED"       → operation was interrupted
+
+obd_elm327_classify_response() looks at the first meaningful characters
+and returns an enum telling you what kind of response this is.
+
+The classification order matters:
+  1. Check for ">" prompt (single character, very specific)
+  2. Check for "OK" (2 chars)
+  3. Check for "NO DATA" (7 chars)
+  4. Check for "?" and error strings
+  5. Check for "ELM" version strings
+  6. If it starts with a hex digit → it's data
+  7. Otherwise → unknown
+
+We check specific patterns first to avoid misclassifying them as data
+(since "OK" and "NO DATA" don't start with hex digits anyway, but
+this ordering is defensive programming).
+
+
+RESPONSE CLEANING
+-----------------
+The messiest part. When you send "010C\r" (ask for RPM), the adapter
+sends back something like:
+
+  "010C\r41 0C 1A F8\r\r>"
+
+Breaking that down:
+  "010C"        — echo of your command (adapter repeats what you sent)
+  "\r"          — end of echo line
+  "41 0C 1A F8" — the actual data from the car
+  "\r\r"        — trailing carriage returns
+  ">"           — prompt (ready for next command)
+
+obd_elm327_clean_response() extracts just "41 0C 1A F8" by:
+
+  1. Splitting the raw response into lines (separated by \r or \n)
+  2. For each line, classifying it with obd_elm327_classify_response()
+  3. If it's DATA → keep it. If it's anything else → skip it.
+  4. Joining multiple data lines with \r (for multi-line responses like VIN)
+  5. Trimming trailing whitespace
+
+The echo ("010C") gets classified as DATA too (it starts with hex), but
+that's actually fine in most cases because the echo is the command we sent,
+and the real data starts with the response byte (0x41 = mode+0x40).
+However, for the cleanest parsing, you should send ATE0 (echo off) during
+initialization. When echo is off, the adapter doesn't repeat the command,
+and we only get the data line.
+
+Why does this function need to handle echo at all? Because some cheap
+adapter clones don't properly honor ATE0. Defensive programming.
+
+
+STRING LITERALS (the "const char *" pattern)
+-------------------------------------------
+The AT command functions return const char* pointing to string literals:
+
+  const char *obd_elm327_cmd_reset(void) { return "ATZ\r"; }
+
+"ATZ\r" is a string literal — it's compiled directly into the binary's
+read-only data section. It exists from program start to program end.
+You NEVER need to free() it. You NEVER need to allocate memory for it.
+
+This is the simplest possible approach: no malloc, no buffers, no cleanup.
+Just return a pointer to a constant string that already exists.

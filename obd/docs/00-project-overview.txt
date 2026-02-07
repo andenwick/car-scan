@@ -1,0 +1,82 @@
+CarScan OBD-II C Library — Overview
+=====================================
+
+WHAT THIS LIBRARY IS
+--------------------
+A standalone C library that parses OBD-II (On-Board Diagnostics) protocol data.
+Every car made after 1996 has an OBD-II port under the dashboard. You plug in an
+ELM327 Bluetooth adapter, and it lets you talk to the car's computer.
+
+The car's computer speaks in hex strings like "41 0C 1A F8". This library
+translates those hex strings into meaningful data like "Engine RPM: 1726".
+
+WHAT THIS LIBRARY IS NOT
+-------------------------
+It does NOT handle Bluetooth. It does NOT connect to anything. It's a pure
+"translator" — you give it hex strings, it gives you structured data back.
+The Android app (Kotlin) handles all the Bluetooth communication and calls
+this library through JNI (Java Native Interface).
+
+WHY C?
+------
+1. Portable — compiles on Windows, Linux, Mac, Android, iOS. Write once, use everywhere.
+2. Fast — no garbage collector, no runtime overhead. Important for real-time sensor data.
+3. Simple — the OBD-II protocol is just byte manipulation. C is perfect for this.
+4. Portfolio piece — a clean C library demonstrates systems programming skill.
+
+DESIGN RULES
+------------
+1. ZERO MALLOC — The caller provides all buffers. No heap allocation means no memory
+   leaks are possible. Every struct is stack-allocated.
+
+2. ZERO I/O — Pure functions: input → output. No file access, no network, no Bluetooth.
+   This makes every function trivially testable.
+
+3. RETURN CODES — Every function returns obd_result_t (an enum). Negative = error,
+   zero = success. The caller always knows what went wrong.
+
+4. STATIC STRINGS — Command functions like obd_elm327_cmd_reset() return pointers to
+   string literals compiled into the binary. No allocation needed.
+
+THE 6 MODULES
+-------------
+1. hex_utils  — Convert between hex strings ("41 0C") and byte arrays ({0x41, 0x0C})
+2. elm327     — Build AT commands for the adapter, classify/clean adapter responses
+3. pid        — Build OBD-II PID requests, parse PID responses
+4. sensor     — Apply formulas to convert raw bytes into engineering units (RPM, temp, etc.)
+5. dtc        — Parse diagnostic trouble codes (P0301, C0035, etc.)
+6. vin        — Decode the 17-character Vehicle Identification Number from multi-line responses
+
+DATA FLOW (how these modules work together)
+-------------------------------------------
+Step 1: You want to read the car's RPM
+Step 2: obd_pid_build_request(0x01, 0x0C, buf, sizeof(buf))
+        → buf now contains "010C\r"
+Step 3: You send "010C\r" over Bluetooth to the ELM327 adapter (Kotlin's job)
+Step 4: The adapter responds with something like "010C\r\n41 0C 1A F8\r\n>"
+Step 5: obd_elm327_clean_response(raw, cleaned, sizeof(cleaned))
+        → cleaned now contains "41 0C 1A F8"
+Step 6: obd_pid_parse_response("41 0C 1A F8", &pid_response)
+        → pid_response.mode = 0x41, .pid = 0x0C, .data = {0x1A, 0xF8}
+Step 7: obd_sensor_decode(&pid_response, &sensor)
+        → sensor.value = 1726.0, sensor.name = "Engine RPM", sensor.unit = "rpm"
+
+BUILD SYSTEM
+------------
+We use CMake (a build system generator) + MSVC (Microsoft's C compiler) + Ninja
+(a fast build executor).
+
+CMake reads CMakeLists.txt files and generates build instructions.
+Ninja executes those instructions to actually compile code.
+MSVC (cl.exe) is the compiler that turns .c files into .obj then into .lib/.exe.
+
+vcvarsall.bat is a Microsoft script that sets up PATH and other environment
+variables so all these tools can find each other.
+
+To build:
+  1. Open a terminal
+  2. Run: "C:\Program Files (x86)\...\vcvarsall.bat" x64
+  3. cd obd && mkdir build && cd build
+  4. cmake .. -G Ninja
+  5. cmake --build .
+  6. ctest --output-on-failure

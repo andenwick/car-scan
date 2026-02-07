@@ -1,0 +1,91 @@
+pid module — Explained
+======================
+
+WHAT IS A PID?
+--------------
+PID = Parameter ID. It's a number that identifies a specific piece of data
+you can request from the car's computer (ECU).
+
+Think of it like a menu at a restaurant:
+  PID 0x05 = "I'd like the coolant temperature please"
+  PID 0x0C = "I'd like the engine RPM please"
+  PID 0x0D = "I'd like the vehicle speed please"
+
+Not every car supports every PID. Luxury cars might support 40+, while
+a basic economy car might only support 15-20.
+
+
+OBD-II MODES
+-------------
+Modes determine what TYPE of data you're asking for:
+
+  Mode 01 = Live data (what's happening RIGHT NOW)
+  Mode 02 = Freeze frame (snapshot saved when a DTC was stored)
+  Mode 03 = Stored DTCs (handled by dtc.c)
+  Mode 04 = Clear DTCs and MIL (reset check engine light)
+  Mode 09 = Vehicle info like VIN (handled by vin.c)
+
+This module handles Mode 01 and Mode 02.
+
+
+REQUEST FORMAT
+--------------
+Very simple: mode byte + PID byte + carriage return.
+
+  "010C\r"  →  Mode 01, PID 0C  →  "Give me live RPM"
+  "020C\r"  →  Mode 02, PID 0C  →  "Give me freeze frame RPM"
+  "0105\r"  →  Mode 01, PID 05  →  "Give me live coolant temp"
+
+The \r tells the ELM327 "I'm done, process this command."
+obd_pid_build_request() formats this string using snprintf.
+
+
+RESPONSE FORMAT
+---------------
+The car responds with: response_mode + PID + data bytes.
+
+Response mode = request mode + 0x40.
+  You sent Mode 01 → response starts with 0x41 (65 decimal)
+  You sent Mode 02 → response starts with 0x42
+  You sent Mode 03 → response starts with 0x43
+
+Example response: "41 0C 1A F8"
+  0x41 = response to Mode 01
+  0x0C = this is PID 0C (RPM)
+  0x1A 0xF8 = the raw data (2 bytes for RPM)
+
+obd_pid_parse_response() does this parsing:
+  1. Converts the hex string to bytes using obd_hex_to_bytes()
+  2. Byte 0 → mode field
+  3. Byte 1 → pid field
+  4. Bytes 2+ → data array + data_len
+
+
+WHY THE +0x40 CONVENTION?
+--------------------------
+It's part of the ISO 15031 standard. The offset ensures you can never
+confuse a request with a response:
+  Request byte:  0x01-0x0A (modes 1-10)
+  Response byte: 0x41-0x4A (always different range)
+
+This matters because the ELM327 might echo your request before the
+response. The +0x40 lets you instantly tell which line is the echo
+(< 0x40) and which is the actual response (>= 0x40).
+
+
+snprintf EXPLAINED
+------------------
+  snprintf(out, out_size, "%02X%02X\r", mode, pid)
+
+  %02X means:
+    % = start format specifier
+    0 = pad with zeros (not spaces)
+    2 = minimum width of 2 characters
+    X = uppercase hexadecimal
+
+  So mode=1, pid=12 → "010C"
+  The \r is the carriage return appended at the end.
+
+  snprintf is SAFE: it NEVER writes more than out_size bytes.
+  If the formatted string is too long, it truncates and still
+  null-terminates. This prevents buffer overflow.
