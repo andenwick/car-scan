@@ -1,0 +1,124 @@
+dtc module — Explained
+=======================
+
+WHAT ARE DTCs?
+--------------
+DTC = Diagnostic Trouble Code. When something goes wrong in your car
+(check engine light comes on), the car's computer stores one or more
+DTCs that describe what the problem is.
+
+Examples:
+  P0301 = Cylinder 1 misfire detected
+  P0420 = Catalyst system efficiency below threshold (bad catalytic converter)
+  P0171 = System too lean (fuel/air mixture problem)
+  C0035 = Left front wheel speed sensor circuit malfunction
+  B0100 = Electronic crash sensor deployment control
+  U0100 = Lost communication with ECM/PCM
+
+The DTC code tells a mechanic WHERE to start looking.
+
+
+DTC FORMAT: "P0301"
+--------------------
+Every DTC is 5 characters:
+
+  Character 1: Category letter
+    P = Powertrain (engine, transmission) — most common, ~80% of codes
+    C = Chassis (ABS, stability control, steering)
+    B = Body (airbags, locks, windows, HVAC)
+    U = Network (CAN bus communication between modules)
+
+  Character 2: Subcategory (0-3)
+    0 = SAE standard (same on all cars)
+    1 = Manufacturer-specific
+    2 = SAE standard
+    3 = SAE/manufacturer shared
+
+  Characters 3-5: Specific fault (000-999)
+    03 = MAF sensor
+    04 = Coolant temp sensor
+    01-04 = Cylinder 1-4 misfire
+    etc.
+
+
+RAW ENCODING: 2 Bytes → 5 Characters
+--------------------------------------
+The car stores each DTC as 2 raw bytes (16 bits). Here's how the
+bits map to the 5-character code:
+
+  Byte 1: AABB CCCC
+  Byte 2: DDDD EEEE
+
+  AA   = bits 15-14 → category letter (00=P, 01=C, 10=B, 11=U)
+  BB   = bits 13-12 → second character (0-3)
+  CCCC = bits 11-8  → third character (0-F, usually 0-9)
+  DDDD = bits 7-4   → fourth character (0-F)
+  EEEE = bits 3-0   → fifth character (0-F)
+
+Example: bytes 0x01, 0x03
+  Byte 1 = 0x01 = 0000 0001
+  Byte 2 = 0x03 = 0000 0011
+
+  AA   = 00     → P
+  BB   = 00     → 0
+  CCCC = 0001   → 1
+  DDDD = 0000   → 0
+  EEEE = 0011   → 3
+
+  Result: P0103 (Mass Air Flow circuit high)
+
+Example: bytes 0x41, 0x04
+  Byte 1 = 0x41 = 0100 0001
+  Byte 2 = 0x04 = 0000 0100
+
+  AA   = 01     → C (Chassis)
+  BB   = 00     → 0
+  CCCC = 0001   → 1
+  DDDD = 0000   → 0
+  EEEE = 0100   → 4
+
+  Result: C0104
+
+
+MODE 03 RESPONSE FORMAT
+------------------------
+You send "03\r" and get back something like:
+  "43 01 03 01 04 00 00"
+
+  0x43 = response to Mode 03 (0x03 + 0x40)
+  01 03 = first DTC (P0103)
+  01 04 = second DTC (P0104)
+  00 00 = padding (means "no more DTCs")
+
+The response always has an even number of bytes after the header,
+padded with 00 00 pairs. We skip those during parsing.
+
+
+BIT MANIPULATION IN parse_single_dtc
+--------------------------------------
+  uint8_t cat_bits = (byte1 >> 6) & 0x03;
+
+  >> 6 = shift right 6 positions → moves bits 7-6 to positions 1-0
+  & 0x03 = mask with 0000 0011 → keeps only the bottom 2 bits
+
+  For byte1 = 0x41 = 0100 0001:
+    >> 6 → 0000 0001
+    & 0x03 → 0000 0001 = 1 → C (Chassis)
+
+  uint8_t d2 = (byte1 >> 4) & 0x03;
+
+  >> 4 shifts bits 5-4 to positions 1-0
+  & 0x03 keeps only those 2 bits
+
+  For byte1 = 0x41:
+    >> 4 → 0000 0100
+    & 0x03 → 0000 0000 = 0
+
+The string "0123456789ABCDEF"[d3] is a neat C trick:
+  It's a char array indexed by the nibble value.
+  "0123456789ABCDEF"[0] = '0'
+  "0123456789ABCDEF"[10] = 'A'
+  "0123456789ABCDEF"[15] = 'F'
+
+  This converts a numeric nibble (0-15) to its hex character
+  without any if/else or arithmetic.

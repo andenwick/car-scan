@@ -1,0 +1,114 @@
+hex_utils module — Explained
+=============================
+
+WHAT IT DOES
+------------
+Converts between hex strings and byte arrays. This is the foundation
+that every other module builds on, because the ELM327 adapter speaks
+in hex text.
+
+Example: "41 0C 1A F8" ←→ {0x41, 0x0C, 0x1A, 0xF8}
+
+
+WHY IS THIS NEEDED?
+--------------------
+When you read data over Bluetooth from the ELM327, you get a TEXT string:
+  "41 0C 1A F8\r\n>"
+
+But to do math on the data (like calculating RPM), you need actual numbers:
+  byte[0] = 65 (0x41), byte[1] = 12 (0x0C), byte[2] = 26 (0x1A), byte[3] = 248 (0xF8)
+
+hex_utils bridges this gap.
+
+
+KEY CONCEPTS
+------------
+
+Hex (hexadecimal) = base-16 numbering:
+  0-9 = 0-9 (same as decimal)
+  A-F = 10-15 (letters extend the digits)
+  Each hex digit = 4 bits (a "nibble")
+  Two hex digits = 8 bits = 1 byte
+
+  "41" = 4*16 + 1 = 65 in decimal = 0100 0001 in binary
+
+Nibble = half a byte (4 bits). One hex character = one nibble.
+  Upper nibble of 0x41 = 0x4 (the "4")
+  Lower nibble of 0x41 = 0x1 (the "1")
+  Combined: (4 << 4) | 1 = 64 | 1 = 65 = 0x41
+
+Bit shifting:
+  << means "shift left" — multiply by powers of 2
+  >> means "shift right" — divide by powers of 2
+  (4 << 4) means "shift 4 left by 4 bits" = 4 * 16 = 64
+  (0xF8 >> 4) means "shift right by 4" = 0x0F = 15
+
+Bitwise OR ( | ):
+  Combines bits: 0100 0000 | 0000 0001 = 0100 0001
+  Used to merge the upper and lower nibbles into one byte.
+
+Bitwise AND ( & ):
+  Masks bits: 0xF8 & 0x0F = 0000 1000 — keeps only the lower 4 bits
+  Used to extract one nibble from a byte.
+
+
+HOW obd_hex_to_bytes WORKS
+---------------------------
+Input: "41 0C 1A F8"
+
+Walk through character by character:
+  '4' → hex_char_to_nibble('4') = 4   (high nibble)
+  '1' → hex_char_to_nibble('1') = 1   (low nibble)
+  Combine: (4 << 4) | 1 = 0x41        → output byte[0] = 0x41
+  ' ' → whitespace, skip
+  '0' → 0 (high)
+  'C' → 12 (low)
+  Combine: (0 << 4) | 12 = 0x0C       → output byte[1] = 0x0C
+  ...and so on.
+
+
+HOW obd_bytes_to_hex WORKS
+---------------------------
+Input: {0x41, 0x0C, 0x1A, 0xF8}
+
+For each byte, extract upper and lower nibbles via lookup table:
+  0x41: upper = (0x41 >> 4) & 0x0F = 4 → '4'
+        lower = 0x41 & 0x0F = 1        → '1'
+  Output: "41"
+  Then add a space separator (except after the last byte).
+
+The hex_chars[] lookup table "0123456789ABCDEF" converts a nibble (0-15)
+to its character. hex_chars[4] = '4', hex_chars[12] = 'C'.
+
+
+HOW obd_strip_whitespace WORKS
+-------------------------------
+Uses a classic "two-pointer" technique:
+
+  Input buffer: "41 0C\r\n"
+                 ^read
+                 ^write
+
+  '4' is not whitespace → copy it, advance both pointers
+  '1' is not whitespace → copy it, advance both
+  ' ' IS whitespace → advance read only (skip it)
+  '0' is not whitespace → copy it to where write points
+  ...
+
+  End result: "410C" in the same buffer. No new memory allocated.
+
+
+THE TEST FILE (test_hex_utils.c)
+---------------------------------
+Tests cover:
+  1. Normal hex with spaces → correct bytes
+  2. Hex without spaces → same bytes (spaces are optional)
+  3. Bytes → hex string (reverse direction)
+  4. Round-trip: hex → bytes → hex gives back the original
+  5. Whitespace stripping
+  6. Error cases: NULL input, invalid hex chars, buffer too small, odd chars
+  7. Lowercase hex input (should work the same as uppercase)
+
+The TEST_ASSERT macro prints file:line on failure and returns 1.
+main() sums up all return values — if any test returns 1, the total
+is non-zero, and ctest reports a failure.

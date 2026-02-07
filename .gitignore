@@ -1,0 +1,57 @@
+# Build artifacts
+build/
+out/
+*.obj
+*.o
+*.lib
+*.a
+*.exe
+*.dll
+*.so
+*.dylib
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+
+# IDE
+.vs/
+.vscode/
+*.suo
+*.user
+*.sln
+*.vcxproj*
+.idea/
+*.iml
+
+# OS
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Android
+android/.gradle/
+android/.kotlin/
+android/build/
+android/app/build/
+android/local.properties
+android/app/.cxx/
+*.apk
+*.aab
+
+# AI / Claude
+CLAUDE.md
+.serena/
+tasks/
+
+# Office temp/lock files
+~$*
+
+# Logs
+*.log
+
+# Windows NUL artifact
+nul
