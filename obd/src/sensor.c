@@ -106,8 +106,7 @@ static float formula_o2_voltage(const uint8_t *data, size_t data_len)
     return (float)data[0] / 200.0f;
 }
 
-/* ((A * 256) + B) * 0.079577 — Runtime in seconds → minutes
- * Actually: raw value is in seconds. We report seconds directly. */
+/* (A * 256) + B — Engine runtime in seconds (0 to 65535 sec) */
 static float formula_runtime(const uint8_t *data, size_t data_len)
 {
     (void)data_len;
