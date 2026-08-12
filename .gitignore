@@ -44,6 +44,7 @@ android/app/.cxx/
 
 # AI / Claude
 CLAUDE.md
+.claude/
 .serena/
 tasks/
 
